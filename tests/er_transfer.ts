@@ -1,22 +1,43 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
+import { Program, web3 } from "@coral-xyz/anchor";
 import { ErTransfer } from "../target/types/er_transfer";
-import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
-import { web3 } from "@coral-xyz/anchor";
+import {
+  DELEGATION_PROGRAM_ID,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+import { getClosestValidator, sendMagicTransaction } from "magic-router-sdk";
+import { Transaction} from "@solana/web3.js";
 import { BN } from "bn.js";
 
-let provider = anchor.AnchorProvider.env()
-anchor.setProvider(provider);
+async function printBalances(program: Program<ErTransfer>, andyBalancePda: web3.PublicKey, bobBalancePda: web3.PublicKey) {
+  let andyBalanceAccount, bobBalanceAccount;
+  try {
+    andyBalanceAccount = await program.account.balance.fetch(andyBalancePda);
+  } catch (e) {
+    andyBalanceAccount = null;
+  }
+  try {
+    bobBalanceAccount = await program.account.balance.fetch(bobBalancePda);
+  } catch (e) {
+    bobBalanceAccount = null;
+  }
 
-const program = anchor.workspace.erTransfer as Program<ErTransfer>;
+  if (andyBalanceAccount) {
+    console.log("Andy Balance: ", andyBalanceAccount.balance.toString());
+  } else {
+    console.log("Andy Balance PDA not initialized");
+  }
+  if (bobBalanceAccount) {
+    console.log("Bob Balance: ", bobBalanceAccount.balance.toString());
+  } else {
+    console.log("Bob Balance PDA not initialized");
+  }
+}
 
-let userBalanceAccount: PublicKey;
-let magicRouterSdk: any;
-let bobAccount: Keypair;
-let bobBalanceAccount: PublicKey;
+describe("dummy-transfer", () => {
+  const provider = anchor.AnchorProvider.env();
+  anchor.setProvider(provider);
 
-describe("er_transfer", () => {
-
+  // Configure the router endpoint for Magic Router
   const routerConnection = new web3.Connection(
     process.env.ROUTER_ENDPOINT || "https://devnet-router.magicblock.app",
     {
@@ -24,102 +45,258 @@ describe("er_transfer", () => {
     }
   );
 
+  console.log("Router Endpoint: ", routerConnection.rpcEndpoint)
+
+  const program = anchor.workspace.ErTransfer as Program<ErTransfer>;
+
+  const bob = web3.Keypair.generate();
+
+  const andyBalancePda = web3.PublicKey.findProgramAddressSync(
+    [provider.wallet.publicKey.toBuffer()],
+    program.programId
+  )[0];
+
+  const bobBalancePda = web3.PublicKey.findProgramAddressSync(
+    [bob.publicKey.toBuffer()],
+    program.programId
+  )[0];
+
+  console.log("Program ID: ", program.programId.toBase58());
+  console.log("Andy Public Key: ", provider.wallet.publicKey.toBase58());
+  console.log("Bob Public Key: ", bob.publicKey.toBase58());
+  console.log("Andy Balance PDA: ", andyBalancePda.toBase58());
+  console.log("Bob Balance PDA: ", bobBalancePda.toBase58());
+
   before(async () => {
+    // If running locally, airdrop SOL to the wallet.
+    if (
+      provider.connection.rpcEndpoint.includes("localhost") ||
+      provider.connection.rpcEndpoint.includes("127.0.0.1")
+    ) {
+      // Airdrop to bob
+      const andyAirdropSignature = await provider.connection.requestAirdrop(
+        provider.wallet.publicKey,
+        2 * web3.LAMPORTS_PER_SOL
+      );
+    }
+  });
 
-    bobAccount = Keypair.generate();
-
-    magicRouterSdk = await import("magic-router-sdk");
-    
-    [userBalanceAccount] = PublicKey.findProgramAddressSync(
-      [provider.wallet.publicKey.toBuffer()],
-      program.programId
+  it("Initialize balances if not already initialized.", async () => {
+    const andyBalancePDA = await provider.connection.getAccountInfo(
+      andyBalancePda
+    );
+    const bobBalancePDA = await provider.connection.getAccountInfo(
+      bobBalancePda
     );
 
-    [bobBalanceAccount] = PublicKey.findProgramAddressSync(
-      [bobAccount.publicKey.toBuffer()],
-      program.programId
+    if(!andyBalancePDA) {
+    const tx = await program.methods
+      .initialize()
+      .accounts({
+        user: provider.wallet.publicKey,
+      })
+      .transaction() as Transaction;
+
+    const signature = await sendMagicTransaction(
+      routerConnection,
+      tx,
+      [provider.wallet.payer]
     );
+    console.log("✅ Initialized Andy Balance PDA! Signature:", signature);
+    } 
+    else {
+      console.log("✅ Andy Balance PDA already initialized!");
+    }
 
-    // const airdropSignature = await provider.connection.requestAirdrop(
-    //   bobAccount.publicKey,
-    //   2 * web3.LAMPORTS_PER_SOL 
-    // );
-      
-    // const latestBlockHash = await provider.connection.getLatestBlockhash();
-    // await provider.connection.confirmTransaction({
-    //   blockhash: latestBlockHash.blockhash,
-    //   lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-    //   signature: airdropSignature,
-    // });
-  })
+    if (!bobBalancePDA) {
+      const transferIx = web3.SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: bob.publicKey,
+        lamports: web3.LAMPORTS_PER_SOL * 0.01,
+      });
+      // Build the initialize instruction
+      const initIx = await program.methods
+        .initialize()
+        .accounts({
+          user: bob.publicKey,
+        })
+        .instruction();
+      const tx = new web3.Transaction()
+        .add(transferIx)
+        .add(initIx);
 
-  it("Initialize", async () => {
-    const tx = await program.methods.initialize().accountsPartial({
-      user: provider.wallet.publicKey,
-      balance: userBalanceAccount,
-      systemProgram: SystemProgram.programId,
-    }).signers([provider.wallet.payer]).rpc();
+      const signature = await sendMagicTransaction(
+        routerConnection,
+        tx,
+        [provider.wallet.payer, bob]
+      );
+      console.log("✅ Initialized Bob Balance PDA! Signature:", signature);
+    } else {
+      console.log("✅ Bob Balance PDA already initialized!");
+    }
 
-    console.log(`Transaction Signature: ${tx}`);
+    await printBalances(program, andyBalancePda, bobBalancePda);
   });
 
-  it("Initialize Bob", async () => {
-    const tx = await program.methods.initialize().accountsPartial({
-      user: bobAccount.publicKey,
-      balance: bobBalanceAccount,
-      systemProgram: SystemProgram.programId,
-    }).signers([bobAccount]).rpc();
+  it("Transfer on base chain from Andy to Bob", async () => {
+    const balanceAccountInfo = await provider.connection.getAccountInfo(
+      andyBalancePda
+    );
+    if (
+      balanceAccountInfo.owner.toBase58() == DELEGATION_PROGRAM_ID.toBase58()
+    ) {
+      console.log("❌ Cannot transfer: Balances are currently delegated");
+      return;
+    }
 
-    console.log(`Transaction Signature: ${tx}`);
+    const tx = await program.methods
+      .transfer(new BN(5))
+      .accounts({
+        payer: provider.wallet.publicKey,
+        receiver: bob.publicKey,
+      })
+      .transaction();
+
+    const signature = await sendMagicTransaction(
+      routerConnection,
+      tx,
+      [provider.wallet.payer]
+    );
+    console.log("✅ Transfered 5 from Andy to Bob");
+    console.log("Transfer Tx: ", signature);
+
+    await printBalances(program, andyBalancePda, bobBalancePda);
   });
 
-  it("Delegate Balance", async () => {
-    let validatorKey = await magicRouterSdk.getClosestValidator(routerConnection);
-    const tx = await program.methods.delegateBalance({
-      commitFrequencyMs: 30000,
-      validator: validatorKey,
-    }).accountsPartial({
-      payer: provider.wallet.publicKey,
-      balance: userBalanceAccount,
-    }).signers([provider.wallet.payer]).rpc();
+  it("Delegate Balances of Andy and Bob", async () => {
+    const balanceAccountInfo = await provider.connection.getAccountInfo(
+      andyBalancePda
+    );
+    if (
+      balanceAccountInfo.owner.toBase58() == DELEGATION_PROGRAM_ID.toBase58()
+    ) {
+      console.log("❌ Balance is already delegated");
+      return;
+    }
 
-    console.log(`Transaction Signature: ${tx}`);
-  });
-
-  it("Delegate Bob Balance", async () => {
-      let validatorKey = await magicRouterSdk.getClosestValidator(routerConnection);
-      const tx = await program.methods.delegateBalance({
+    const validatorKey = await getClosestValidator(routerConnection);
+    const tx = await program.methods
+      .delegateBalance({
         commitFrequencyMs: 30000,
         validator: validatorKey,
-      }).accountsPartial({
-        payer: bobAccount.publicKey,
-        balance: bobBalanceAccount,
-      }).signers([bobAccount]).rpc();
+      })
+      .accounts({
+        payer: provider.wallet.publicKey,
+      })
+      .postInstructions([
+        await program.methods
+          .delegateBalance({
+        commitFrequencyMs: 30000,
+        validator: validatorKey,
+      })
+          .accounts({
+            payer: bob.publicKey,
+          })
+          .instruction()
+      ])
+      .transaction();
 
-      console.log(`Transaction Signature: ${tx}`);
+    const signature = await sendMagicTransaction(
+      routerConnection,
+      tx,
+      [provider.wallet.payer, bob]
+    );
+
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    console.log("✅ Delegated Balances of Andy and Bob");
+    console.log("Delegation signature", signature);
   });
 
-  it("Transfer", async () => {
-    let amount = new BN(1);
+  it("Perform transfers in the ephemeral rollup", async () => {
+    const balanceAccountInfo = await provider.connection.getAccountInfo(
+      andyBalancePda
+    );
+    if (
+      balanceAccountInfo.owner.toBase58() != DELEGATION_PROGRAM_ID.toBase58()
+    ) {
+      console.log("Balance is not delegated");
+      return;
+    }
 
-    const tx = await program.methods.transfer(amount).accountsPartial({
-      payer: provider.wallet.publicKey,
-      balance: userBalanceAccount,
-      receiver: bobAccount.publicKey,
-      receiverBalance: bobBalanceAccount,
-      systemProgram: SystemProgram.programId,
-    }).signers([provider.wallet.payer]).rpc();
+    const tx1 = await program.methods
+      .transfer(new BN(5))
+      .accounts({
+        payer: provider.wallet.publicKey,
+        receiver: bob.publicKey,
+      })
+      .transaction();
 
-    console.log(`Transaction Signature: ${tx}`);
+    const signature1 = await sendMagicTransaction(
+      routerConnection,
+      tx1,
+      [provider.wallet.payer]
+    );
+    console.log("✅ Transfered 5 from Andy to Bob in the ephemeral rollup");
+    console.log("Transfer Tx: ", signature1);
+
+    const tx2 = await program.methods
+      .transfer(new BN(15))
+      .accounts({
+        payer: bob.publicKey,
+        receiver: provider.wallet.publicKey,
+      })
+      .transaction();
+
+    const signature2 = await sendMagicTransaction(
+      routerConnection,
+      tx2,
+      [bob]
+    );
+    console.log("✅ Transfered 15 from Bob to Andy in the ephemeral rollup");
+    console.log("Transfer Tx: ", signature2);
   });
 
-  it("Undelegate", async () => {
-    const tx = await program.methods.undelegate().accountsPartial({
-      payer: provider.wallet.publicKey,
-      balance: userBalanceAccount,
-    }).signers([provider.wallet.payer]).rpc();
+  it("Undelegate Balances of Andy and Bob", async () => {
+    const balanceAccountInfo = await provider.connection.getAccountInfo(
+      andyBalancePda
+    );
+    if (
+      balanceAccountInfo.owner.toBase58() != DELEGATION_PROGRAM_ID.toBase58()
+    ) {
+      console.log("Balance is not delegated");
+      return;
+    }
 
-    console.log(`Transaction Signature: ${tx}`);
-  })
+    const tx1 = await program.methods
+      .undelegate()
+      .accounts({
+        payer: provider.wallet.publicKey,
+      })
+      .transaction();
 
+    const signature1 = await sendMagicTransaction(
+      routerConnection,
+      tx1,
+      [provider.wallet.payer]
+    );
+
+    const tx2 = await program.methods
+      .undelegate()
+      .accounts({
+        payer: bob.publicKey,
+      })
+      .transaction();
+
+    const signature2 = await sendMagicTransaction(
+      routerConnection,
+      tx2,
+      [bob]
+    );
+
+    console.log("✅ Undelegated Balances of Andy and Bob");
+    console.log("Undelegation signatures:", signature1, signature2);
+    await new Promise(resolve => setTimeout(resolve, 5000)); 
+    await printBalances(program, andyBalancePda, bobBalancePda);
+  });
 });

@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-er_transfer = "3jZTjopbnwnbcKmTk1HboEsrzJhF8bao2BL2C4p6c1Wi"
+er_transfer = "6usNHyiitnGsAaswdKpLaE69Ax1SG162ZrhdfmPreLWQ"
 
 [registry]
 url = "https://api.apr.dev"
@@ -14,9 +14,6 @@ url = "https://api.apr.dev"
 [provider]
 cluster = "devnet"
 wallet = "~/.config/solana/id.json"
-
-# [scripts]
-# test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
 
 [scripts]
 test = "NODE_OPTIONS='--import tsx' yarn run mocha --timeout 1000000 tests/**/*.ts"
